@@ -4,8 +4,6 @@ from typing import List, Dict, Tuple
 from network import BaseStation, Aggregator
 
 class CentralizedAlgorithms:
-    """集中式算法实现"""
-    
     @staticmethod
     def solve_jesls(stations: List[BaseStation], 
                    time_step: int,
@@ -13,12 +11,14 @@ class CentralizedAlgorithms:
                    lambda_2: float = 0.5,
                    max_iterations: int = 100,
                    convergence_threshold: float = 1e-6) -> Dict:
-        """联合能源共享和负载转移算法 (JESLS)
-        
-        通过迭代优化负载分布和能源配置来最小化电网能源消耗
-        """
         n = len(stations)
+        
+        # 初始化基站的传输功率为最大值
+        for station in stations:
+            station.current_power = station.max_power
+        
         prev_objective = float('inf')
+        energy_sufficient = False  # 添加可再生能源充足指示变量
         
         for iteration in range(max_iterations):
             # 1. 解决负载分布问题 (LDP)
@@ -33,7 +33,15 @@ class CentralizedAlgorithms:
                 lambda_2 * energy_config['service_quality']
             )
             
-            # 4. 检查收敛性
+            # 4. 检查可再生能源是否充足
+            renewable_energy_sum = sum(s.renewable_energy for s in stations)
+            total_energy_demand = sum(load_distribution[s.id] for s in stations)
+            if renewable_energy_sum >= total_energy_demand:
+                energy_sufficient = True
+            else:
+                energy_sufficient = False
+            
+            # 5. 检查收敛性
             if abs(current_objective - prev_objective) < convergence_threshold:
                 break
                 
@@ -42,12 +50,11 @@ class CentralizedAlgorithms:
         return {
             'load_distribution': load_distribution,
             'energy_config': energy_config,
+            'energy_sufficient': energy_sufficient,  # 返回可再生能源是否充足
             'iterations': iteration + 1
         }
-    
     @staticmethod
     def solve_ldp(stations: List[BaseStation]) -> Dict[int, float]:
-        """线性规划缩减算法 (LPD) 解决负载分布问题"""
         n = len(stations)
         
         # 获取当前状态
@@ -57,15 +64,17 @@ class CentralizedAlgorithms:
         
         # 定义优化变量
         x = cp.Variable(n)
+        phi = cp.Variable()  # 新增变量 phi
         
-        # 目标函数：最小化负载方差
-        objective = cp.Minimize(cp.sum_squares(x - cp.mean(x)))
+        # 目标函数：最大化最小冗余传输速率
+        objective = cp.Maximize(phi)
         
         # 约束条件
         constraints = [
             x >= 0,
             x <= current_loads,
-            x <= battery_levels + renewable_energy
+            x <= battery_levels + renewable_energy,
+            cp.minimum(current_loads - x) >= phi  # 确保最小冗余传输速率大于等于 phi
         ]
         
         # 求解优化问题
@@ -78,58 +87,27 @@ class CentralizedAlgorithms:
     
     @staticmethod
     def solve_ecp(stations: List[BaseStation], 
-                  load_distribution: Dict[int, float]) -> Dict:
-        """解决能源配置问题 (ECP)"""
+                load_distribution: Dict[int, float]) -> Dict:
         n = len(stations)
         
-        # 定义优化变量
-        p_grid = cp.Variable(n)  # 电网功率
-        p_battery = cp.Variable(n)  # 电池功率
-        p_renewable = cp.Variable(n)  # 可再生能源功率
-        service_level = cp.Variable(n)  # 服务水平
+        # 1. 解决功率控制问题 (IPC)
+        power_config = CentralizedAlgorithms.solve_ipc(stations)
         
-        # 获取当前状态
-        renewable_energy = np.array([s.renewable_energy for s in stations])
-        battery_levels = np.array([s.battery_level for s in stations])
-        current_loads = np.array([load_distribution[s.id] for s in stations])
+        # 2. 解决能源合作问题 (SWF)
+        energy_config = CentralizedAlgorithms.solve_swf(stations)
         
-        # 目标函数
-        energy_cost = cp.sum(p_grid)
-        service_quality = cp.sum(service_level)
+        # 3. 计算目标函数值
+        energy_cost = sum(energy_config['p_grid'])
+        service_quality = sum(energy_config['service_level'])
         
-        objective = cp.Minimize(energy_cost - service_quality)
-        
-        # 约束条件
-        constraints = [
-            p_renewable + p_battery + p_grid == current_loads,
-            p_renewable <= renewable_energy,
-            p_battery <= battery_levels,
-            service_level >= 0,
-            service_level <= 1,
-            service_level <= p_renewable / current_loads
-        ]
-        
-        # 求解优化问题
-        problem = cp.Problem(objective, constraints)
-        try:
-            problem.solve(solver=cp.ECOS)
-            return {
-                'p_grid': p_grid.value,
-                'p_battery': p_battery.value,
-                'p_renewable': p_renewable.value,
-                'service_level': service_level.value,
-                'grid_cost': float(energy_cost.value),
-                'service_quality': float(service_quality.value)
-            }
-        except:
-            return {
-                'p_grid': np.zeros(n),
-                'p_battery': np.zeros(n),
-                'p_renewable': renewable_energy,
-                'service_level': np.ones(n),
-                'grid_cost': 0.0,
-                'service_quality': float(n)
-            }
+        return {
+            'p_grid': energy_config['p_grid'],
+            'p_battery': energy_config['p_battery'],
+            'p_renewable': energy_config['p_renewable'],
+            'service_level': energy_config['service_level'],
+            'grid_cost': energy_cost,
+            'service_quality': service_quality
+        }
     
     @staticmethod
     def solve_ipc(stations: List[BaseStation], 
@@ -242,7 +220,7 @@ class DistributedAlgorithms:
             'power': optimal_power,
             'performance': DistributedAlgorithms._calculate_performance(station, optimal_power)
         }
-    
+        
     @staticmethod
     def _calculate_performance(station: BaseStation, power: float) -> float:
         """计算给定功率下的性能"""
@@ -282,4 +260,4 @@ class DistributedAlgorithms:
                     energy_balance[i] -= transfer_amount
                     energy_balance[j] += transfer_amount
         
-        return energy_transfers 
+        return energy_transfers
