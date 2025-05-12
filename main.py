@@ -3,120 +3,169 @@ import matplotlib.pyplot as plt
 from network import Network
 from energy import EnergyManager
 from traffic import TrafficManager
+from algorithms import CentralizedAlgorithms
+from typing import Tuple, Dict
 
-def main():
+def run_simulation(use_aggregator: bool, num_stations: int = 10, area_size: Tuple[float, float] = (1000, 1000)) -> Dict:
+    """运行单次模拟"""
     # 初始化网络
-    network = Network(num_stations=10, area_size=(1000, 1000))
+    network = Network(num_stations=num_stations, area_size=area_size)
     energy_manager = EnergyManager(network)
     traffic_manager = TrafficManager(network)
+    
+    # 设置是否使用聚合器优化
+    traffic_manager.set_aggregator_optimization(use_aggregator)
     
     # 模拟参数
     simulation_hours = 24
     metrics = {
-        'energy_cost': [],
-        'network_performance': [],
         'battery_levels': [],
-        'renewable_energy': []  # 新增：记录可再生能源
+        'renewable_energy': [],
+        'energy_cost': [],
+        'service_quality': [],
+        'aggregator_utilization': [],
+        'load_balance_index': []
     }
     
     # 运行模拟
     for time_step in range(simulation_hours):
-        # 更新可再生能源
-        network.update_renewable_energy(time_step)
+        # 更新可再生能源（根据是否使用聚合器切换分配模式）
+        network.update_renewable_energy(time_step, use_aggregator)
         
         # 更新流量负载
         traffic_manager.update_traffic_load(time_step)
         
-        # 优化流量分布
-        traffic_manager.optimize_traffic_distribution()
+        # 使用集中式算法优化
+        result = CentralizedAlgorithms.solve_jesls(
+            stations=network.stations,
+            time_step=time_step,
+            lambda_1=0.5,
+            lambda_2=0.5
+        )
         
-        # 优化能源分配
-        energy_manager.optimize_energy_allocation(time_step)
+        # 更新网络状态
+        for station in network.stations:
+            station.current_power = result['energy_config']['power_allocation'][station.id]
         
         # 更新电池电量
         network.update_battery_levels()
         
-        # 更新电网电价
-        energy_manager.update_grid_price(time_step)
+        # 根据聚合器使用情况调整电网电价
+        if use_aggregator:
+            energy_manager.grid_price = 0.8  # 聚合器场景下较低电网电价
+        else:
+            energy_manager.grid_price = 1.2  # 无聚合器场景下较高电网电价
+        
+        # 计算能源成本
+        energy_cost = energy_manager.calculate_energy_cost(time_step)
+        
+        # 计算网络性能
+        performance = traffic_manager.calculate_network_performance()
         
         # 记录指标
-        metrics['energy_cost'].append(energy_manager.calculate_energy_cost(time_step))
-        metrics['network_performance'].append(traffic_manager.calculate_network_performance())
         metrics['battery_levels'].append([s.battery_level for s in network.stations])
         metrics['renewable_energy'].append([s.renewable_energy for s in network.stations])
+        metrics['energy_cost'].append(energy_cost)
+        metrics['service_quality'].append(result['energy_config']['service_quality'])
+        metrics['aggregator_utilization'].append(performance['aggregator_utilization'])
+        metrics['load_balance_index'].append(performance['load_balance_index'])
     
-    # 绘制结果
-    plot_results(metrics, simulation_hours)
-    plot_network_topology(network)  # 新增：绘制网络拓扑
+    return metrics
 
-def plot_network_topology(network):
-    """绘制网络拓扑结构"""
-    plt.figure(figsize=(10, 10))
+def main():
+    """主函数：运行对比模拟并展示结果"""
+    # 运行两种场景的模拟
+    metrics_with_aggregator = run_simulation(use_aggregator=True)
+    metrics_without_aggregator = run_simulation(use_aggregator=False)
     
-    # 绘制聚合器
-    agg_x, agg_y = network.aggregator.location
-    plt.plot(agg_x, agg_y, 'ro', markersize=15, label='Aggregator')
-    
-    # 绘制基站
-    for station in network.stations:
-        x, y = station.location
-        plt.plot(x, y, 'bo', markersize=10, label=f'Station {station.id}' if station.id == 0 else "")
-        
-        # 绘制到聚合器的连接线
-        plt.plot([x, agg_x], [y, agg_y], 'k--', alpha=0.3)
-    
-    plt.title('Network Topology')
-    plt.xlabel('X Coordinate')
-    plt.ylabel('Y Coordinate')
+    # 仅生成能耗对比图
+    plot_energy_cost_comparison(metrics_with_aggregator, metrics_without_aggregator)
+
+def plot_energy_cost_comparison(metrics_with: Dict, metrics_without: Dict):
+    """绘制能耗对比结果"""
+    hours = range(24)
+    plt.figure(figsize=(10, 5))
+    plt.plot(hours, metrics_with['energy_cost'], 'b-', label='With Aggregator')
+    plt.plot(hours, metrics_without['energy_cost'], 'r--', label='Without Aggregator')
+    plt.xlabel('Hour')
+    plt.ylabel('Energy Cost (¥)')
+    plt.title('Energy Cost Comparison')
     plt.grid(True)
     plt.legend()
-    plt.savefig('network_topology.png')
+    plt.savefig('energy_cost_comparison.png')
     plt.close()
 
-def plot_results(metrics, simulation_hours):
-    """绘制模拟结果"""
-    hours = range(simulation_hours)
+def plot_comparison_results(metrics_with: Dict, metrics_without: Dict):
+    """绘制对比结果"""
+    hours = range(24)
     
-    # 创建图形
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    # 创建图形，包含六个子图
+    fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(15, 18))
     
-    # 绘制能源成本
-    ax1.plot(hours, metrics['energy_cost'], 'b-', label='Energy Cost')
+    # 1. 电池电量对比
+    battery_with = np.array(metrics_with['battery_levels'])
+    battery_without = np.array(metrics_without['battery_levels'])
+    avg_battery_with = np.mean(battery_with, axis=1)
+    avg_battery_without = np.mean(battery_without, axis=1)
+    ax1.plot(hours, avg_battery_with, 'b-', label='With Aggregator')
+    ax1.plot(hours, avg_battery_without, 'r--', label='Without Aggregator')
     ax1.set_xlabel('Hour')
-    ax1.set_ylabel('Cost (¥)')
-    ax1.set_title('Energy Cost Over Time')
+    ax1.set_ylabel('Average Battery Level (kWh)')
+    ax1.set_title('Battery Levels Comparison')
     ax1.grid(True)
+    ax1.legend()
     
-    # 绘制网络性能
-    performance = metrics['network_performance']
-    load_balance = [p['load_balance_index'] for p in performance]
-    ax2.plot(hours, load_balance, 'g-', label='Load Balance Index')
+    # 2. 可再生能源对比
+    renewable_with = np.array(metrics_with['renewable_energy'])
+    renewable_without = np.array(metrics_without['renewable_energy'])
+    avg_renewable_with = np.mean(renewable_with, axis=1)
+    avg_renewable_without = np.mean(renewable_without, axis=1)
+    ax2.plot(hours, avg_renewable_with, 'g-', label='With Aggregator')
+    ax2.plot(hours, avg_renewable_without, 'r--', label='Without Aggregator')
     ax2.set_xlabel('Hour')
-    ax2.set_ylabel('Balance Index')
-    ax2.set_title('Network Load Balance Over Time')
+    ax2.set_ylabel('Average Renewable Energy (W)')
+    ax2.set_title('Renewable Energy Comparison')
     ax2.grid(True)
+    ax2.legend()
     
-    # 绘制电池电量
-    battery_levels = np.array(metrics['battery_levels'])
-    for i in range(battery_levels.shape[1]):
-        ax3.plot(hours, battery_levels[:, i], label=f'Station {i+1}')
+    # 3. 能源成本对比
+    ax3.plot(hours, metrics_with['energy_cost'], 'b-', label='With Aggregator')
+    ax3.plot(hours, metrics_without['energy_cost'], 'r--', label='Without Aggregator')
     ax3.set_xlabel('Hour')
-    ax3.set_ylabel('Battery Level (kWh)')
-    ax3.set_title('Battery Levels Over Time')
+    ax3.set_ylabel('Energy Cost (¥)')
+    ax3.set_title('Energy Cost Comparison')
     ax3.grid(True)
     ax3.legend()
     
-    # 绘制可再生能源
-    renewable_energy = np.array(metrics['renewable_energy'])
-    avg_renewable = np.mean(renewable_energy, axis=1)
-    ax4.plot(hours, avg_renewable, 'r-', label='Average Renewable Energy')
+    # 4. 服务质量对比
+    ax4.plot(hours, metrics_with['service_quality'], 'b-', label='With Aggregator')
+    ax4.plot(hours, metrics_without['service_quality'], 'r--', label='Without Aggregator')
     ax4.set_xlabel('Hour')
-    ax4.set_ylabel('Power (W)')
-    ax4.set_title('Average Renewable Energy Over Time')
+    ax4.set_ylabel('Service Quality Score')
+    ax4.set_title('Service Quality Comparison')
     ax4.grid(True)
+    ax4.legend()
+    
+    # 5. 聚合器利用率
+    ax5.plot(hours, metrics_with['aggregator_utilization'], 'b-', label='With Aggregator')
+    ax5.plot(hours, metrics_without['aggregator_utilization'], 'r--', label='Without Aggregator')
+    ax5.set_xlabel('Hour')
+    ax5.set_ylabel('Aggregator Utilization')
+    ax5.set_title('Aggregator Utilization Comparison')
+    ax5.grid(True)
+    ax5.legend()
+    
+    # 6. 负载均衡指数对比
+    ax6.plot(hours, metrics_with['load_balance_index'], 'b-', label='With Aggregator')
+    ax6.plot(hours, metrics_without['load_balance_index'], 'r--', label='Without Aggregator')
+    ax6.set_xlabel('Hour')
+    ax6.set_ylabel('Load Balance Index')
+    ax6.set_title('Load Balance Comparison')
+    ax6.grid(True)
+    ax6.legend()
     
     plt.tight_layout()
-    plt.savefig('simulation_results.png')
+    plt.savefig('comparison_results.png')
     plt.close()
 
 if __name__ == '__main__':

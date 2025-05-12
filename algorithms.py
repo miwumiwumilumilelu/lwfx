@@ -74,7 +74,7 @@ class CentralizedAlgorithms:
             x >= 0,
             x <= current_loads,
             x <= battery_levels + renewable_energy,
-            cp.minimum(current_loads - x) >= phi  # 确保最小冗余传输速率大于等于 phi
+            current_loads - x >= phi  # 修改：直接使用向量比较
         ]
         
         # 求解优化问题
@@ -88,6 +88,7 @@ class CentralizedAlgorithms:
     @staticmethod
     def solve_ecp(stations: List[BaseStation], 
                 load_distribution: Dict[int, float]) -> Dict:
+        """能源配置问题 (ECP)"""
         n = len(stations)
         
         # 1. 解决功率控制问题 (IPC)
@@ -97,8 +98,18 @@ class CentralizedAlgorithms:
         energy_config = CentralizedAlgorithms.solve_swf(stations)
         
         # 3. 计算目标函数值
-        energy_cost = sum(energy_config['p_grid'])
-        service_quality = sum(energy_config['service_level'])
+        energy_cost = sum(energy_config['p_grid']) * 0.5  # 假设电网电价为0.5元/单位
+        service_quality = sum(energy_config['service_level']) / n  # 归一化服务等级
+        
+        # 4. 计算总功率分配
+        power_allocation = {
+            station.id: (
+                energy_config['p_renewable'][i] +
+                energy_config['p_battery'][i] +
+                energy_config['p_grid'][i]
+            )
+            for i, station in enumerate(stations)
+        }
         
         return {
             'p_grid': energy_config['p_grid'],
@@ -106,7 +117,8 @@ class CentralizedAlgorithms:
             'p_renewable': energy_config['p_renewable'],
             'service_level': energy_config['service_level'],
             'grid_cost': energy_cost,
-            'service_quality': service_quality
+            'service_quality': service_quality,
+            'power_allocation': power_allocation  # 添加功率分配
         }
     
     @staticmethod
@@ -140,30 +152,54 @@ class CentralizedAlgorithms:
         return {station.id: float(current_power[i]) for i, station in enumerate(stations)}
     
     @staticmethod
-    def solve_swf(stations: List[BaseStation]) -> Dict[int, float]:
+    def solve_swf(stations: List[BaseStation]) -> Dict:
         """序贯注水算法 (SWF)"""
         n = len(stations)
         renewable_energy = np.array([s.renewable_energy for s in stations])
         current_load = np.array([s.current_power for s in stations])
+        battery_levels = np.array([s.battery_level for s in stations])
+        
+        # 初始化能源分配
+        p_renewable = np.zeros(n)  # 可再生能源分配
+        p_battery = np.zeros(n)    # 电池能源分配
+        p_grid = np.zeros(n)       # 电网能源分配
+        service_level = np.zeros(n)  # 服务等级
         
         # 按负载排序
         sorted_indices = np.argsort(current_load)
-        allocated_energy = np.zeros(n)
+        remaining_renewable = np.sum(renewable_energy)
         
-        # 序贯分配可再生能源
-        remaining_energy = np.sum(renewable_energy)
+        # 序贯分配能源
         for idx in sorted_indices:
-            if remaining_energy <= 0:
+            if remaining_renewable <= 0:
                 break
                 
-            energy_to_allocate = min(
-                current_load[idx] - allocated_energy[idx],
-                remaining_energy
+            # 1. 优先使用可再生能源
+            renewable_to_use = min(
+                current_load[idx],
+                renewable_energy[idx],
+                remaining_renewable
             )
-            allocated_energy[idx] += energy_to_allocate
-            remaining_energy -= energy_to_allocate
+            p_renewable[idx] = renewable_to_use
+            remaining_renewable -= renewable_to_use
             
-        return {station.id: float(allocated_energy[i]) for i, station in enumerate(stations)}
+            # 2. 其次使用电池能源
+            remaining_load = current_load[idx] - p_renewable[idx]
+            battery_to_use = min(remaining_load, battery_levels[idx])
+            p_battery[idx] = battery_to_use
+            
+            # 3. 最后使用电网能源
+            p_grid[idx] = max(0, remaining_load - battery_to_use)
+            
+            # 计算服务等级
+            service_level[idx] = min(1.0, (p_renewable[idx] + p_battery[idx] + p_grid[idx]) / current_load[idx])
+        
+        return {
+            'p_renewable': p_renewable.tolist(),
+            'p_battery': p_battery.tolist(),
+            'p_grid': p_grid.tolist(),
+            'service_level': service_level.tolist()
+        }
 
 class DistributedAlgorithms:
     """分布式算法实现"""

@@ -31,25 +31,33 @@ class EnergyManager:
         # 4. 使用分布式算法进行能源合作
         energy_transfers = DistributedAlgorithms.energy_cooperation(self.network.stations)
         
+        aggregator = self.network.aggregator
+        available_capacity = aggregator.get_available_capacity()
+        
         # 更新基站状态
         for i, station in enumerate(self.network.stations):
             # 更新功率
             station.current_power = ipc_result[station.id]
-            
             # 更新可再生能源
-            station.renewable_energy = swf_result[station.id]
-            
+            station.renewable_energy = swf_result[station.id] if station.id in swf_result else station.renewable_energy
             # 更新电池电量
             if station.id in jesls_result['energy_config']['p_battery']:
                 station.battery_level -= jesls_result['energy_config']['p_battery'][i]
                 station.battery_level = max(0, station.battery_level)
-            
             # 处理能源转移
             for (from_id, to_id), amount in energy_transfers.items():
                 if station.id == from_id:
                     station.battery_level -= amount
                 elif station.id == to_id:
                     station.battery_level += amount
+        
+        # --- 新增：聚合器根据当前负载和电池状态调整能源分配 ---
+        if available_capacity > 0:
+            total_battery = sum(station.battery_level for station in self.network.stations)
+            if total_battery > available_capacity:
+                # 按比例分配电池电量
+                for station in self.network.stations:
+                    station.battery_level = (station.battery_level / total_battery) * available_capacity
         
         return [s.current_power for s in self.network.stations]
     
